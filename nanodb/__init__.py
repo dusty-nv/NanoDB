@@ -6,3 +6,5 @@ from .vector_index import (
     DistanceMetrics, 
 )
 
+from .version import __version__
+
