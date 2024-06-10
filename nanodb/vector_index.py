@@ -3,8 +3,9 @@ import os
 import sys
 import time
 import tqdm
-import torch
+import logging
 
+import torch
 import numpy as np
 import ctypes as C
 
@@ -20,7 +21,7 @@ from cuda.cudart import (
     cudaStreamSynchronize,
 )
 
-from .utils import AttributeDict, cudaAllocMapped, assert_cuda, torch_dtype, tqdm_redirect_stdout
+from nanodb.utils import AttributeDict, cudaAllocMapped, assert_cuda, convert_dtype, tqdm_redirect_stdout
 
 
 class cudaVectorIndex:
@@ -40,17 +41,22 @@ class cudaVectorIndex:
         Parameters:
         
           dim (int) -- dimension of the vectors (i.e. the size of the embedding)
-          dtype (np.dtype) -- data type of the vectors, either float32 or float16
+          dtype (np.dtype|str) -- data type of the vectors, either float32 or float16
           reserve (int) -- maximum amount of memory (in bytes) to allocate for storing vectors (default 1GB)
           metric (str) -- the distance metric to use (recommend 'l2', 'inner_product', or 'cosine')
           max_search_queries (int) -- the maximum number of queries to search for at a time
         """
         self.shape = (0, dim)
-        self.dtype = dtype
-        self.dsize = np.dtype(dtype).itemsize
         self.metric = metric
-        self.stats = AttributeDict()
         
+        self.stats = AttributeDict()
+        self.dtype = convert_dtype(dtype, to='np')
+        
+        if isinstance(self.dtype, type):
+            self.dsize = np.dtype(self.dtype).itemsize
+        else:
+            self.dsize = self.dtype.itemsize
+
         self.reserved_size = reserve
         self.reserved = int(self.reserved_size / (dim * self.dsize))
         self.max_search_queries = max_search_queries
@@ -60,11 +66,10 @@ class cudaVectorIndex:
         self.torch_stream = torch.cuda.ExternalStream(int(self.stream), device='cuda:0')
         #torch.cuda.set_stream(self.torch_stream)
         
-        print(f"-- creating CUDA stream {self.stream}")
-        print(f"-- creating CUDA vector index ({self.reserved},{dim}) dtype={dtype} metric={metric}")
+        logging.info(f"nanodb creating CUDA vector index ({self.reserved},{dim}) dtype={dtype} metric={metric} stream={self.stream}")
         
-        self.vectors = cudaAllocMapped((self.reserved, dim), dtype) # inputs
-        self.queries = cudaAllocMapped((max_search_queries, dim), dtype)
+        self.vectors = cudaAllocMapped((self.reserved, dim), self.dtype) # inputs
+        self.queries = cudaAllocMapped((max_search_queries, dim), self.dtype)
 
         self.indexes = cudaAllocMapped((max_search_queries, self.reserved), np.int64) # outputs
         self.distances = cudaAllocMapped((max_search_queries, self.reserved), np.float32)
@@ -149,7 +154,7 @@ class cudaVectorIndex:
         if queries.shape[1] != self.shape[1]:
             raise ValueError(f"queries must match the vector dimension ({self.shape[1]})")
         
-        if queries.dtype != self.dtype and queries.dtype != torch_dtype(self.dtype):
+        if queries.dtype != self.dtype and queries.dtype != convert_dtype(self.dtype, to='pt'):
             raise ValueError(f"queries need to use {self.dtype} dtype (was type {queries.dtype})")
             
         if isinstance(queries, np.ndarray):
@@ -225,7 +230,7 @@ class cudaVectorIndex:
                 ))
                 self.sync()
                 if self.indexes.array[0][0] != n:
-                    print(f"incorrect or duplicate index [{n}]  indexes={self.indexes.array[0,:k]}  distances={self.distances.array[0,:k]}")
+                    logging.warning(f"incorrect or duplicate index [{n}]  indexes={self.indexes.array[0,:k]}  distances={self.distances.array[0,:k]}")
                     #assert(self.indexes[0][0]==n)
                     correct=False
                 
